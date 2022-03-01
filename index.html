@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+<script>
+    const socket = new WebSocket('ws://localhost:8000/ws')
+
+    console.log("Attempt to connect")
+
+    socket.onopen = () => {
+        console.log("Successfully connected")
+    }
+
+    socket.onclose = () => {
+        console.log("Connection close")
+    }
+
+    socket.onmessage = (data) => {
+        console.log(JSON.parse(JSON.parse(data.data)))
+    }
+
+    socket.onerror = (err) => {
+        console.log('Socket err:', err)
+    }
+</script>
+</body>
+</html>
