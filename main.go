@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"log"
@@ -13,6 +12,9 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 var (
@@ -32,9 +34,6 @@ func homePage(w http.ResponseWriter, r *http.Request) {
 func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 	hub := newHub()
 	go hub.run()
-	upgrader.CheckOrigin = func(r *http.Request) bool {
-		return true
-	}
 
 	log.Println("Client Successfully Connected...")
 
@@ -52,9 +51,11 @@ type Room struct {
 }
 
 type Hub struct {
-	rooms      map[string]Room
+	rooms      map[string]*Room
+	clients    map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
+	broadcast  chan []byte
 }
 
 type Client struct {
@@ -62,49 +63,61 @@ type Client struct {
 	RoomId string `json:"room_id,omitempty"`
 	hub    *Hub
 	conn   *websocket.Conn
+	send   chan []byte
 }
 
 func newHub() *Hub {
 	return &Hub{
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		rooms:      make(map[string]Room),
+		broadcast:  make(chan []byte),
+		rooms:      map[string]*Room{"eb09b78f-975b-44d3-b988-60f6b8d5fb0e": {"eb09b78f-975b-44d3-b988-60f6b8d5fb0e", make([]*Client, 0)}},
+		clients:    make(map[*Client]bool),
 	}
-}
-
-func newRoom() Room {
-	room := Room{id: uuid.New().String(), clients: make([]*Client, 0)}
-	return room
 }
 
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.rooms[client.RoomId] = Room{client.RoomId, append(h.rooms[client.RoomId].clients, client)}
-			fmt.Printf("%+v \n", h.rooms)
+			h.clients[client] = true
 			json, _ := json.Marshal(client)
 			client.conn.WriteJSON(string(json))
 
 		case client := <-h.unregister:
+			delete(h.clients, client)
 
-			if _, ok := h.rooms[client.RoomId]; ok {
-				var updateClients []*Client
-				for _, item := range h.rooms[client.RoomId].clients {
-					if item != nil {
-						updateClients = append(updateClients, item)
+		case message := <-h.broadcast:
+
+			var data struct {
+				Id     string `json:"id,omitempty" `
+				RoomId string `json:"room_id,omitempty"`
+				Action string `json:"action"`
+				Ident  string `json:"ident"`
+			}
+			if err := json.Unmarshal(message, &data); err != nil {
+				panic(err)
+			}
+
+			if _, ok := h.rooms[data.RoomId]; ok && data.Action == "join" {
+
+				for client := range h.clients {
+					clientData := *client
+
+					if clientData.Id == data.Id {
+						clients := append(h.rooms[data.RoomId].clients, client)
+						h.rooms[data.RoomId] = &Room{data.RoomId, clients}
+
+						response := struct {
+							Status string `json:"status,omitempty"`
+							Id     string `json:"id,omitempty"`
+						}{Status: "ok", Id: clientData.Id}
+						log.Println(h.rooms[data.RoomId])
+						json, _ := json.Marshal(response)
+						client.conn.WriteJSON(string(json))
+						break
 					}
 				}
-
-				if len(updateClients) == 0 {
-					delete(h.rooms, client.RoomId)
-				} else {
-					h.rooms[client.RoomId] = Room{
-						h.rooms[client.RoomId].id,
-						updateClients,
-					}
-				}
-
 			}
 		}
 	}
@@ -117,23 +130,9 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := &Client{hub: hub, conn: conn, Id: uuid.New().String()}
-	for k, item := range hub.rooms {
-		if len(item.clients) < 6 {
-			client.RoomId = k
-			break
-		}
-	}
-	if client.RoomId == "" {
-		room := newRoom()
-		client.RoomId = room.id
-		hub.rooms[room.id] = room
-	}
-	log.Println(client.RoomId)
 	client.hub.register <- client
 
 	go client.connectionPump()
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
 }
 
 func (c *Client) connectionPump() {
@@ -150,5 +149,6 @@ func (c *Client) connectionPump() {
 			break
 		}
 		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+		c.hub.broadcast <- message
 	}
 }

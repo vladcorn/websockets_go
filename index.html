@@ -8,6 +8,7 @@
 <script>
     const socket = new WebSocket('ws://localhost:8000/ws')
 
+
     console.log("Attempt to connect")
 
     socket.onopen = () => {
@@ -19,8 +20,17 @@
     }
 
     socket.onmessage = (data) => {
-        console.log(JSON.parse(JSON.parse(data.data)))
+        const parsedData = JSON.parse(JSON.parse(data.data))
+        if (parsedData.hasOwnProperty("id") && !parsedData.hasOwnProperty("status")) {
+            socket.send(JSON.stringify({
+                ...parsedData,
+                room_id: 'eb09b78f-975b-44d3-b988-60f6b8d5fb0e',
+                action: 'join',
+                ident: 'id1'
+            }))
+        }
     }
+
 
     socket.onerror = (err) => {
         console.log('Socket err:', err)
