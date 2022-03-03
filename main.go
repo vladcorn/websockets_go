@@ -23,26 +23,19 @@ var (
 )
 
 func main() {
-	setupRoutes()
+	hub := newHub()
+	go hub.run()
+	http.HandleFunc("/", homePage)
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Client Successfully Connected...")
+		serveWs(hub, w, r)
+	})
+
 	log.Fatal(http.ListenAndServe(":8000", nil))
 }
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "index.html")
-}
-
-func wsEndpoint(w http.ResponseWriter, r *http.Request) {
-	hub := newHub()
-	go hub.run()
-
-	log.Println("Client Successfully Connected...")
-
-	serveWs(hub, w, r)
-}
-
-func setupRoutes() {
-	http.HandleFunc("/", homePage)
-	http.HandleFunc("/ws", wsEndpoint)
 }
 
 type Room struct {
