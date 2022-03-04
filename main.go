@@ -7,6 +7,7 @@ import (
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"strings"
 )
 
 var upgrader = websocket.Upgrader{
@@ -39,8 +40,10 @@ func homePage(w http.ResponseWriter, r *http.Request) {
 }
 
 type Room struct {
-	id      string
-	clients []*Client
+	id         string
+	clients    []*Client
+	PublicKeys map[string]int
+	SecretKeys map[string]int
 }
 
 type Hub struct {
@@ -49,6 +52,7 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan []byte
+	keysSwap   chan bool
 }
 
 type Client struct {
@@ -64,8 +68,16 @@ func newHub() *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan []byte),
-		rooms:      map[string]*Room{"eb09b78f-975b-44d3-b988-60f6b8d5fb0e": {"eb09b78f-975b-44d3-b988-60f6b8d5fb0e", make([]*Client, 0)}},
-		clients:    make(map[*Client]bool),
+		keysSwap:   make(chan bool),
+		rooms: map[string]*Room{
+			"eb09b78f-975b-44d3-b988-60f6b8d5fb0e": {
+				"eb09b78f-975b-44d3-b988-60f6b8d5fb0e",
+				make([]*Client, 0),
+				make(map[string]int),
+				make(map[string]int),
+			},
+		},
+		clients: make(map[*Client]bool),
 	}
 }
 
@@ -78,38 +90,153 @@ func (h *Hub) run() {
 			client.conn.WriteJSON(string(json))
 
 		case client := <-h.unregister:
+			for _, room := range h.rooms {
+				for idx, c := range room.clients {
+					if c.Id == client.Id {
+						room.clients = append(room.clients[:idx], room.clients[idx+1:]...)
+						break
+					}
+				}
+			}
+
 			delete(h.clients, client)
 
 		case message := <-h.broadcast:
 
 			var data struct {
-				Id     string `json:"id,omitempty" `
-				RoomId string `json:"room_id,omitempty"`
-				Action string `json:"action"`
-				Ident  string `json:"ident"`
+				Id        string `json:"id,omitempty"`
+				RoomId    string `json:"room_id,omitempty"`
+				Action    string `json:"action,omitempty"`
+				Ident     string `json:"ident,omitempty"`
+				Signature string `json:"signature,omitempty"`
+				PublicKey int    `json:"public_key,omitempty"`
+				Secret    int    `json:"secret,omitempty"`
+				UserId    string `json:"user_id,omitempty"`
 			}
 			if err := json.Unmarshal(message, &data); err != nil {
 				panic(err)
 			}
 
-			if _, ok := h.rooms[data.RoomId]; ok && data.Action == "join" {
+			if _, roomExist := h.rooms[data.RoomId]; roomExist || data.Signature != "" {
+				switch data.Action {
+				case "join":
+					for client := range h.clients {
+						clientData := *client
 
-				for client := range h.clients {
-					clientData := *client
+						if clientData.Id == data.Id {
+							clients := append(h.rooms[data.RoomId].clients, client)
+							h.rooms[data.RoomId] = &Room{data.RoomId, clients, h.rooms[data.RoomId].PublicKeys, h.rooms[data.RoomId].SecretKeys}
 
-					if clientData.Id == data.Id {
-						clients := append(h.rooms[data.RoomId].clients, client)
-						h.rooms[data.RoomId] = &Room{data.RoomId, clients}
+							response := struct {
+								Status string `json:"status,omitempty"`
+								Id     string `json:"id,omitempty"`
+							}{Status: "ok", Id: clientData.Id}
 
-						response := struct {
-							Status string `json:"status,omitempty"`
-							Id     string `json:"id,omitempty"`
-						}{Status: "ok", Id: clientData.Id}
-						log.Println(h.rooms[data.RoomId])
-						json, _ := json.Marshal(response)
-						client.conn.WriteJSON(string(json))
-						break
+							json, _ := json.Marshal(response)
+							client.conn.WriteJSON(string(json))
+							break
+						}
 					}
+					if data.Signature == "" {
+						if len(h.rooms[data.RoomId].clients) > 1 {
+							signature := data.RoomId + ":"
+							for i, client := range h.rooms[data.RoomId].clients {
+								signature += client.Id
+								if i < len(h.rooms[data.RoomId].clients)-1 {
+									signature += ","
+								}
+							}
+
+							for _, client := range h.rooms[data.RoomId].clients {
+								response := struct {
+									Id        string `json:"id"`
+									Action    string `json:"action"`
+									Signature string `json:"signature"`
+									P         int    `json:"p"`
+									Q         int    `json:"q"`
+								}{
+									Id:        uuid.New().String(),
+									Action:    "exchange",
+									Signature: signature,
+									P:         123,
+									Q:         234,
+								}
+
+								json, _ := json.Marshal(response)
+								client.conn.WriteJSON(string(json))
+							}
+						}
+					}
+				case "receive_public_key":
+					var roomId string
+					var userIds []string
+					i := strings.IndexByte(data.Signature, ':')
+					if i != -1 {
+						roomId = data.Signature[:i]
+						userIdsStr := data.Signature[i+1:]
+						userIds = strings.Split(userIdsStr, ",")
+					}
+					if roomId != "" {
+						h.rooms[roomId].PublicKeys[data.UserId] = data.PublicKey
+						if len(h.rooms[roomId].PublicKeys) == len(userIds) {
+							for i, k := range userIds {
+								for _, client := range h.rooms[roomId].clients {
+									var pk int
+									if i == len(userIds)-1 {
+										pk = h.rooms[roomId].PublicKeys[userIds[0]]
+									} else {
+										pk = h.rooms[roomId].PublicKeys[userIds[i+1]]
+									}
+									if client.Id == k {
+										response := struct {
+											Id        string `json:"id"`
+											Action    string `json:"action"`
+											PublicKey int    `json:"public_key"`
+										}{
+											Id:        uuid.New().String(),
+											Action:    "do_secret",
+											PublicKey: pk,
+										}
+										json, _ := json.Marshal(response)
+										client.conn.WriteJSON(string(json))
+									}
+								}
+							}
+						}
+					}
+				case "receive_secret":
+					var roomId string
+					var userIds []string
+					i := strings.IndexByte(data.Signature, ':')
+					if i != -1 {
+						roomId = data.Signature[:i]
+						userIdsStr := data.Signature[i+1:]
+						userIds = strings.Split(userIdsStr, ",")
+					}
+					if roomId != "" {
+						h.rooms[roomId].SecretKeys[data.UserId] = data.Secret
+						if len(h.rooms[roomId].SecretKeys) == len(userIds) {
+							for _, k := range userIds {
+								for _, client := range h.rooms[roomId].clients {
+									if client.Id == k {
+										response := struct {
+											Id        string `json:"id"`
+											Status    string `json:"status"`
+											Signature string `json:"signature"`
+										}{
+											Id:        uuid.New().String(),
+											Status:    "ready",
+											Signature: data.Signature,
+										}
+										json, _ := json.Marshal(response)
+										client.conn.WriteJSON(string(json))
+									}
+								}
+							}
+						}
+
+					}
+
 				}
 			}
 		}

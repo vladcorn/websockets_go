@@ -5,32 +5,115 @@
     <title>Title</title>
 </head>
 <body>
+<form>
+    <input type="text" name="ident" placeholder="ident">
+    <button type="submit">Join</button>
+</form>
+
 <script>
     const socket = new WebSocket('ws://localhost:8000/ws')
+    const secretNum = localStorage.getItem('secretNum') ? parseInt(localStorage.getItem('secretNum')) : parseInt(Math.random() * 100)
+
+    function uuidv4() {
+        return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
+            (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+        );
+    }
+
+    let userData = {
+        room_id: 'eb09b78f-975b-44d3-b988-60f6b8d5fb0e',
+        signature: localStorage.getItem("signature"),
+        user_id: localStorage.getItem("userId"),
+        p: localStorage.getItem("p"),
+        q: localStorage.getItem("q")
+    }
+    const form = document.querySelector('form')
+
+    form.addEventListener('submit', (e) => {
+            e.preventDefault()
+            let formValues = {
+                ...userData,
+                action: 'join',
+                ident: '',
+                signature: ''
+            }
+            Object.keys(form.elements).forEach(key => {
+                if (formValues.hasOwnProperty(key)) {
+                    formValues[key] = form.elements[key].value
+                }
+            })
+
+            socket.send(JSON.stringify(
+                Object.keys(formValues).reduce((acc, item) => {
+                    if (Boolean(formValues[item])) {
+                        acc[item] = formValues[item]
+                    }
+                    return acc
+                }, {})
+            ))
+            form.reset()
+
+        }
+    )
+
+    const saveSignatureToLocalStorageService = (signature, p, q, secretNum, userId) => {
+        if (!Boolean(localStorage.getItem("signature"))) {
+            localStorage.setItem("signature", signature)
+            localStorage.setItem("userId", userId)
+            localStorage.setItem("p", p)
+            localStorage.setItem("q", q)
+            localStorage.setItem("secretNum", secretNum)
+        }
+    }
 
 
     console.log("Attempt to connect")
 
     socket.onopen = () => {
         console.log("Successfully connected")
+        if (userData.room_id && userData.user_id && userData.signature) {
+            socket.send(JSON.stringify({
+                id: uuidv4(),
+                signature: userData.signature,
+                action: 'join',
+                user_id: userData.user_id
+            }))
+        }
     }
 
     socket.onclose = () => {
         console.log("Connection close")
     }
 
+
     socket.onmessage = (data) => {
         const parsedData = JSON.parse(JSON.parse(data.data))
-        if (parsedData.hasOwnProperty("id") && !parsedData.hasOwnProperty("status")) {
-            socket.send(JSON.stringify({
-                ...parsedData,
-                room_id: 'eb09b78f-975b-44d3-b988-60f6b8d5fb0e',
-                action: 'join',
-                ident: 'id1'
-            }))
+        if (!parsedData.hasOwnProperty("status")) {
+            switch (parsedData.action) {
+                case "exchange":
+                    saveSignatureToLocalStorageService(parsedData.signature, parsedData.p, parsedData.q, secretNum, userData.id)
+                    socket.send(JSON.stringify({
+                        id: parsedData.id,
+                        signature: parsedData.signature,
+                        public_key: parsedData.p ^ secretNum % parsedData.q,
+                        action: 'receive_public_key',
+                        user_id: userData.id
+                    }))
+                    break;
+                case "do_secret":
+                    userData.secret = parsedData.public_key ^ secretNum % userData.q
+                    socket.send(JSON.stringify({
+                        secret: userData.secret,
+                        signature: userData.signature,
+                        action: "receive_secret",
+                        user_id: userData.id
+                    }))
+                    break
+
+            }
+            userData = {...userData, ...parsedData}
         }
     }
-
 
     socket.onerror = (err) => {
         console.log('Socket err:', err)
