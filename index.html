@@ -102,6 +102,7 @@
                     break;
                 case "do_secret":
                     userData.secret = parsedData.public_key ^ secretNum % userData.q
+                    localStorage.setItem("secret", userData.secret)
                     socket.send(JSON.stringify({
                         secret: userData.secret,
                         signature: userData.signature,

@@ -56,11 +56,12 @@ type Hub struct {
 }
 
 type Client struct {
-	Id     string `json:"id,omitempty" `
-	RoomId string `json:"room_id,omitempty"`
-	hub    *Hub
-	conn   *websocket.Conn
-	send   chan []byte
+	Id        string `json:"id,omitempty" `
+	RoomId    string `json:"room_id,omitempty"`
+	hub       *Hub
+	conn      *websocket.Conn
+	send      chan []byte
+	signature string
 }
 
 func newHub() *Hub {
@@ -142,8 +143,13 @@ func (h *Hub) run() {
 							signature := data.RoomId + ":"
 							for i, client := range h.rooms[data.RoomId].clients {
 								signature += client.Id
-								if i < len(h.rooms[data.RoomId].clients)-1 {
+								if i%2 == 0 {
 									signature += ","
+								}
+								if i%2 != 0 {
+									h.rooms[data.RoomId].clients[i-1].signature = signature
+									client.signature = signature
+									signature = data.RoomId + ":"
 								}
 							}
 
@@ -157,7 +163,7 @@ func (h *Hub) run() {
 								}{
 									Id:        uuid.New().String(),
 									Action:    "exchange",
-									Signature: signature,
+									Signature: client.signature,
 									P:         123,
 									Q:         234,
 								}
@@ -234,9 +240,7 @@ func (h *Hub) run() {
 								}
 							}
 						}
-
 					}
-
 				}
 			}
 		}
