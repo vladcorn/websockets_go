@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 )
@@ -44,6 +45,23 @@ type Room struct {
 	clients    []*Client
 	PublicKeys map[string]int
 	SecretKeys map[string]int
+	iteration  int
+}
+
+type Data struct {
+	Id        string `json:"id,omitempty"`
+	RoomId    string `json:"room_id,omitempty"`
+	Action    string `json:"action,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey int    `json:"public_key,omitempty"`
+	Secret    int    `json:"secret,omitempty"`
+	UserId    string `json:"user_id,omitempty"`
+}
+
+type KeySwap struct {
+	roomId  string
+	userIds []string
+	data    Data
 }
 
 type Hub struct {
@@ -52,7 +70,7 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan []byte
-	keysSwap   chan bool
+	keysSwap   chan KeySwap
 }
 
 type Client struct {
@@ -66,19 +84,20 @@ type Client struct {
 
 func newHub() *Hub {
 	return &Hub{
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan []byte),
-		keysSwap:   make(chan bool),
+		register:   make(chan *Client, 100),
+		unregister: make(chan *Client, 100),
+		broadcast:  make(chan []byte, 100),
+		keysSwap:   make(chan KeySwap, 100),
 		rooms: map[string]*Room{
 			"eb09b78f-975b-44d3-b988-60f6b8d5fb0e": {
 				"eb09b78f-975b-44d3-b988-60f6b8d5fb0e",
 				make([]*Client, 0),
 				make(map[string]int),
 				make(map[string]int),
+				0,
 			},
 		},
-		clients: make(map[*Client]bool),
+		clients: make(map[*Client]bool, 100),
 	}
 }
 
@@ -87,8 +106,6 @@ func (h *Hub) run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			json, _ := json.Marshal(client)
-			client.conn.WriteJSON(string(json))
 
 		case client := <-h.unregister:
 			for _, room := range h.rooms {
@@ -101,14 +118,51 @@ func (h *Hub) run() {
 			}
 
 			delete(h.clients, client)
+			log.Println(h.clients, h.rooms["eb09b78f-975b-44d3-b988-60f6b8d5fb0e"].clients)
 
+		case chData := <-h.keysSwap:
+			roomId := chData.roomId
+			data := chData.data
+			userIds := chData.userIds
+
+			if roomId != "" {
+				h.rooms[roomId].PublicKeys[data.UserId] = data.PublicKey
+				if len(h.rooms[roomId].PublicKeys) == len(userIds) {
+					for i, k := range userIds {
+						for _, client := range h.rooms[roomId].clients {
+							var pk int
+
+							if i >= len(userIds)-(1+h.rooms[roomId].iteration) {
+								pk = h.rooms[roomId].PublicKeys[userIds[int(math.Abs(float64(len(userIds)-(i+h.rooms[roomId].iteration+1))))]]
+							} else {
+								pk = h.rooms[roomId].PublicKeys[userIds[1+h.rooms[roomId].iteration]]
+							}
+
+							if client.Id == k {
+								response := struct {
+									Id        string `json:"id"`
+									Action    string `json:"action"`
+									PublicKey int    `json:"public_key"`
+								}{
+									Id:        uuid.New().String(),
+									Action:    "do_secret",
+									PublicKey: pk,
+								}
+								client.conn.WriteJSON(response)
+							}
+						}
+						if i == len(userIds)-1 {
+							h.rooms[roomId].iteration += 1
+						}
+					}
+				}
+			}
 		case message := <-h.broadcast:
 
 			var data struct {
 				Id        string `json:"id,omitempty"`
 				RoomId    string `json:"room_id,omitempty"`
 				Action    string `json:"action,omitempty"`
-				Ident     string `json:"ident,omitempty"`
 				Signature string `json:"signature,omitempty"`
 				PublicKey int    `json:"public_key,omitempty"`
 				Secret    int    `json:"secret,omitempty"`
@@ -121,20 +175,27 @@ func (h *Hub) run() {
 			if _, roomExist := h.rooms[data.RoomId]; roomExist || data.Signature != "" {
 				switch data.Action {
 				case "join":
+					log.Println(h.clients, h.rooms[data.RoomId].clients)
 					for client := range h.clients {
-						clientData := *client
-
-						if clientData.Id == data.Id {
+						if client.Id == data.UserId {
 							clients := append(h.rooms[data.RoomId].clients, client)
-							h.rooms[data.RoomId] = &Room{data.RoomId, clients, h.rooms[data.RoomId].PublicKeys, h.rooms[data.RoomId].SecretKeys}
+							h.rooms[data.RoomId] = &Room{
+								data.RoomId,
+								clients,
+								make(map[string]int),
+								make(map[string]int),
+								0,
+							}
 
 							response := struct {
 								Status string `json:"status,omitempty"`
 								Id     string `json:"id,omitempty"`
-							}{Status: "ok", Id: clientData.Id}
+							}{
+								Status: "ok",
+								Id:     data.Id,
+							}
 
-							json, _ := json.Marshal(response)
-							client.conn.WriteJSON(string(json))
+							client.conn.WriteJSON(response)
 							break
 						}
 					}
@@ -143,16 +204,10 @@ func (h *Hub) run() {
 							signature := data.RoomId + ":"
 							for i, client := range h.rooms[data.RoomId].clients {
 								signature += client.Id
-								if i%2 == 0 {
+								if i != len(h.rooms[data.RoomId].clients)-1 {
 									signature += ","
 								}
-								if i%2 != 0 {
-									h.rooms[data.RoomId].clients[i-1].signature = signature
-									client.signature = signature
-									signature = data.RoomId + ":"
-								}
 							}
-
 							for _, client := range h.rooms[data.RoomId].clients {
 								response := struct {
 									Id        string `json:"id"`
@@ -163,13 +218,11 @@ func (h *Hub) run() {
 								}{
 									Id:        uuid.New().String(),
 									Action:    "exchange",
-									Signature: client.signature,
+									Signature: signature,
 									P:         123,
 									Q:         234,
 								}
-
-								json, _ := json.Marshal(response)
-								client.conn.WriteJSON(string(json))
+								client.conn.WriteJSON(response)
 							}
 						}
 					}
@@ -182,34 +235,11 @@ func (h *Hub) run() {
 						userIdsStr := data.Signature[i+1:]
 						userIds = strings.Split(userIdsStr, ",")
 					}
-					if roomId != "" {
-						h.rooms[roomId].PublicKeys[data.UserId] = data.PublicKey
-						if len(h.rooms[roomId].PublicKeys) == len(userIds) {
-							for i, k := range userIds {
-								for _, client := range h.rooms[roomId].clients {
-									var pk int
-									if i == len(userIds)-1 {
-										pk = h.rooms[roomId].PublicKeys[userIds[0]]
-									} else {
-										pk = h.rooms[roomId].PublicKeys[userIds[i+1]]
-									}
-									if client.Id == k {
-										response := struct {
-											Id        string `json:"id"`
-											Action    string `json:"action"`
-											PublicKey int    `json:"public_key"`
-										}{
-											Id:        uuid.New().String(),
-											Action:    "do_secret",
-											PublicKey: pk,
-										}
-										json, _ := json.Marshal(response)
-										client.conn.WriteJSON(string(json))
-									}
-								}
-							}
-						}
+
+					if h.rooms[roomId].iteration < len(userIds) {
+						h.keysSwap <- KeySwap{roomId, userIds, data}
 					}
+
 				case "receive_secret":
 					var roomId string
 					var userIds []string
@@ -221,24 +251,29 @@ func (h *Hub) run() {
 					}
 					if roomId != "" {
 						h.rooms[roomId].SecretKeys[data.UserId] = data.Secret
-						if len(h.rooms[roomId].SecretKeys) == len(userIds) {
-							for _, k := range userIds {
-								for _, client := range h.rooms[roomId].clients {
-									if client.Id == k {
-										response := struct {
-											Id        string `json:"id"`
-											Status    string `json:"status"`
-											Signature string `json:"signature"`
-										}{
-											Id:        uuid.New().String(),
-											Status:    "ready",
-											Signature: data.Signature,
+						if h.rooms[roomId].iteration > len(userIds)-2 {
+							if len(h.rooms[roomId].SecretKeys) == len(userIds) {
+								for _, k := range userIds {
+									for _, client := range h.rooms[roomId].clients {
+										if client.Id == k {
+											response := struct {
+												Id        string `json:"id"`
+												Status    string `json:"status"`
+												Signature string `json:"signature"`
+											}{
+												Id:        uuid.New().String(),
+												Status:    "ready",
+												Signature: data.Signature,
+											}
+											client.conn.WriteJSON(response)
 										}
-										json, _ := json.Marshal(response)
-										client.conn.WriteJSON(string(json))
 									}
 								}
+								h.rooms[roomId].iteration = 0
 							}
+						} else {
+							data.PublicKey = data.Secret
+							h.keysSwap <- KeySwap{roomId, userIds, data}
 						}
 					}
 				}
@@ -253,9 +288,8 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-	client := &Client{hub: hub, conn: conn, Id: uuid.New().String()}
+	client := &Client{hub: hub, conn: conn}
 	client.hub.register <- client
-
 	go client.connectionPump()
 }
 
@@ -272,7 +306,12 @@ func (c *Client) connectionPump() {
 			}
 			break
 		}
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		c.hub.broadcast <- message
+		m := bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+		var data Data
+		if err := json.Unmarshal(message, &data); err != nil {
+			panic(err)
+		}
+		c.Id = data.UserId
+		c.hub.broadcast <- m
 	}
 }

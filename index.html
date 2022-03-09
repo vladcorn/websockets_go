@@ -20,10 +20,11 @@
         );
     }
 
+
     let userData = {
         room_id: 'eb09b78f-975b-44d3-b988-60f6b8d5fb0e',
         signature: localStorage.getItem("signature"),
-        user_id: localStorage.getItem("userId"),
+        user_id: localStorage.getItem("userId") ?? uuidv4(),
         p: localStorage.getItem("p"),
         q: localStorage.getItem("q")
     }
@@ -34,7 +35,6 @@
             let formValues = {
                 ...userData,
                 action: 'join',
-                ident: '',
                 signature: ''
             }
             Object.keys(form.elements).forEach(key => {
@@ -49,7 +49,9 @@
                         acc[item] = formValues[item]
                     }
                     return acc
-                }, {})
+                }, {
+                    id: uuidv4(),
+                })
             ))
             form.reset()
 
@@ -76,7 +78,8 @@
                 id: uuidv4(),
                 signature: userData.signature,
                 action: 'join',
-                user_id: userData.user_id
+                user_id: userData.user_id,
+                room_id:userData.room_id
             }))
         }
     }
@@ -87,17 +90,17 @@
 
 
     socket.onmessage = (data) => {
-        const parsedData = JSON.parse(JSON.parse(data.data))
+        const parsedData = JSON.parse(data.data)
         if (!parsedData.hasOwnProperty("status")) {
             switch (parsedData.action) {
                 case "exchange":
-                    saveSignatureToLocalStorageService(parsedData.signature, parsedData.p, parsedData.q, secretNum, userData.id)
+                    saveSignatureToLocalStorageService(parsedData.signature, parsedData.p, parsedData.q, secretNum, userData.user_id)
                     socket.send(JSON.stringify({
                         id: parsedData.id,
                         signature: parsedData.signature,
                         public_key: parsedData.p ^ secretNum % parsedData.q,
                         action: 'receive_public_key',
-                        user_id: userData.id
+                        user_id: userData.user_id
                     }))
                     break;
                 case "do_secret":
@@ -107,7 +110,7 @@
                         secret: userData.secret,
                         signature: userData.signature,
                         action: "receive_secret",
-                        user_id: userData.id
+                        user_id: userData.user_id
                     }))
                     break
 
