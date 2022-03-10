@@ -176,8 +176,21 @@ func (h *Hub) run() {
 			if _, roomExist := h.rooms[data.RoomId]; roomExist || data.Signature != "" {
 				switch data.Action {
 				case "join":
+
 					for client := range h.clients {
 						if client.Id == data.UserId {
+							if len(h.rooms[data.RoomId].clients) == 6 {
+								response := struct {
+									Status string `json:"status,omitempty"`
+									Id     string `json:"id,omitempty"`
+								}{
+									Status: "room is busy",
+									Id:     data.Id,
+								}
+
+								client.conn.WriteJSON(response)
+								break
+							}
 							clients := append(h.rooms[data.RoomId].clients, client)
 							h.rooms[data.RoomId] = &Room{
 								data.RoomId,
