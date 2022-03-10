@@ -12,7 +12,8 @@
 
 <script>
     const socket = new WebSocket('ws://localhost:8000/ws')
-    const secretNum = localStorage.getItem('secretNum') ? parseInt(localStorage.getItem('secretNum')) : parseInt(Math.random() * 100)
+    const secretNum = localStorage.getItem('secretNum') ? parseInt(localStorage.getItem('secretNum')) : parseInt(Math.random() * 10)
+
 
     function uuidv4() {
         return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
@@ -79,7 +80,7 @@
                 signature: userData.signature,
                 action: 'join',
                 user_id: userData.user_id,
-                room_id:userData.room_id
+                room_id: userData.room_id
             }))
         }
     }
@@ -98,13 +99,13 @@
                     socket.send(JSON.stringify({
                         id: parsedData.id,
                         signature: parsedData.signature,
-                        public_key: parsedData.p ^ secretNum % parsedData.q,
+                        public_key: parsedData.p ** secretNum % parsedData.q,
                         action: 'receive_public_key',
                         user_id: userData.user_id
                     }))
                     break;
                 case "do_secret":
-                    userData.secret = parsedData.public_key ^ secretNum % userData.q
+                    userData.secret = parsedData.public_key ** secretNum % userData.q
                     localStorage.setItem("secret", userData.secret)
                     socket.send(JSON.stringify({
                         secret: userData.secret,
@@ -112,7 +113,7 @@
                         action: "receive_secret",
                         user_id: userData.user_id
                     }))
-                    break
+                    break;
 
             }
             userData = {...userData, ...parsedData}

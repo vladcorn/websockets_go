@@ -118,7 +118,6 @@ func (h *Hub) run() {
 			}
 
 			delete(h.clients, client)
-			log.Println(h.clients, h.rooms["eb09b78f-975b-44d3-b988-60f6b8d5fb0e"].clients)
 
 		case chData := <-h.keysSwap:
 			roomId := chData.roomId
@@ -127,18 +126,19 @@ func (h *Hub) run() {
 
 			if roomId != "" {
 				h.rooms[roomId].PublicKeys[data.UserId] = data.PublicKey
+				log.Println(len(h.rooms[roomId].PublicKeys) == len(userIds))
+
 				if len(h.rooms[roomId].PublicKeys) == len(userIds) {
 					for i, k := range userIds {
 						for _, client := range h.rooms[roomId].clients {
-							var pk int
-
-							if i >= len(userIds)-(1+h.rooms[roomId].iteration) {
-								pk = h.rooms[roomId].PublicKeys[userIds[int(math.Abs(float64(len(userIds)-(i+h.rooms[roomId].iteration+1))))]]
-							} else {
-								pk = h.rooms[roomId].PublicKeys[userIds[1+h.rooms[roomId].iteration]]
-							}
-
 							if client.Id == k {
+								var pk int
+								log.Println(i, h.rooms[roomId].iteration, int(math.Abs(float64(len(userIds)-(i+h.rooms[roomId].iteration+1)))))
+								if i >= len(userIds)-(1+h.rooms[roomId].iteration) {
+									pk = h.rooms[roomId].PublicKeys[userIds[int(math.Abs(float64(len(userIds)-(i+h.rooms[roomId].iteration+1))))]]
+								} else {
+									pk = h.rooms[roomId].PublicKeys[userIds[i+h.rooms[roomId].iteration+1]]
+								}
 								response := struct {
 									Id        string `json:"id"`
 									Action    string `json:"action"`
@@ -153,6 +153,7 @@ func (h *Hub) run() {
 						}
 						if i == len(userIds)-1 {
 							h.rooms[roomId].iteration += 1
+							h.rooms[roomId].PublicKeys = make(map[string]int)
 						}
 					}
 				}
@@ -175,7 +176,6 @@ func (h *Hub) run() {
 			if _, roomExist := h.rooms[data.RoomId]; roomExist || data.Signature != "" {
 				switch data.Action {
 				case "join":
-					log.Println(h.clients, h.rooms[data.RoomId].clients)
 					for client := range h.clients {
 						if client.Id == data.UserId {
 							clients := append(h.rooms[data.RoomId].clients, client)
@@ -235,10 +235,7 @@ func (h *Hub) run() {
 						userIdsStr := data.Signature[i+1:]
 						userIds = strings.Split(userIdsStr, ",")
 					}
-
-					if h.rooms[roomId].iteration < len(userIds) {
-						h.keysSwap <- KeySwap{roomId, userIds, data}
-					}
+					h.keysSwap <- KeySwap{roomId, userIds, data}
 
 				case "receive_secret":
 					var roomId string
@@ -251,7 +248,7 @@ func (h *Hub) run() {
 					}
 					if roomId != "" {
 						h.rooms[roomId].SecretKeys[data.UserId] = data.Secret
-						if h.rooms[roomId].iteration > len(userIds)-2 {
+						if h.rooms[roomId].iteration >= len(userIds)-1 {
 							if len(h.rooms[roomId].SecretKeys) == len(userIds) {
 								for _, k := range userIds {
 									for _, client := range h.rooms[roomId].clients {
@@ -270,6 +267,7 @@ func (h *Hub) run() {
 									}
 								}
 								h.rooms[roomId].iteration = 0
+								h.rooms[roomId].PublicKeys = make(map[string]int)
 							}
 						} else {
 							data.PublicKey = data.Secret
